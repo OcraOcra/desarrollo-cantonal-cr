@@ -19,7 +19,7 @@ ids21 <- ids21 %>%
   mutate(
     across(c(indice_salud, indice_participa, indice_seguridad, indice_educacion,
              indice_economico, ids_sin_normalizar, ids_2023_final),
-           ~ as.numeric(gsub(",", "", .))),
+            ~ as.numeric(gsub(",", ".", .))),
     cod_prov = substr(cod, 1, 1),
     cod_cant = substr(cod, 2, 3)
   )
@@ -34,8 +34,8 @@ names(ids22) <- c("posicion", "provincia", "cod", "canton", "ids_2023", "densida
 ids22 <- ids22 %>% filter(posicion != "") %>%
   mutate(
     posicion = as.numeric(posicion),
-    ids_2023 = as.numeric(gsub(",", "", ids_2023)),
-    densidad_pob = as.numeric(gsub(",", "", densidad_pob)),
+    ids_2023 = as.numeric(gsub(",", ".", ids_2023)),
+    densidad_pob = as.numeric(gsub(",", ".", densidad_pob)),
     cod_prov = substr(cod, 1, 1),
     cod_cant = substr(cod, 2, 3)
   )
