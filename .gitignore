@@ -1,0 +1,16 @@
+# R
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Data cache (raw downloads)
+data/pib_cantonal.xlsx
+
+# Intermediate knit file
+*.knit.md
+
+# OS
+.DS_Store
+Thumbs.db

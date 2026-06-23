@@ -1,0 +1,369 @@
+---
+title: "Determinantes del Desarrollo Cantonal en Costa Rica"
+subtitle: "Un análisis del Índice de Desarrollo Social 2023 (MIDEPLAN) y sus factores asociados"
+author: "Marco Artavia Pacheco"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6, fig.align = "center")
+```
+
+```{r packages}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(corrplot)
+library(FactoMineR)
+library(factoextra)
+library(GGally)
+library(car)
+library(lmtest)
+library(sf)
+library(kableExtra)
+```
+
+```{r data-import}
+data_dir <- "data"
+
+# IDS 2023 por cantón con dimensiones (Tabla 21 - 84 cantones, incluidos los 3 nuevos)
+ids <- read.csv(file.path(data_dir, "ids_dimensiones_cantonales.csv"),
+                stringsAsFactors = FALSE) %>%
+  mutate(cod_prov = as.character(cod_prov), cod_cant = as.character(cod_cant))
+
+# Indicadores del ArcGIS (81 cantones - IDPHC, IDHC, etc.)
+arcgis <- read.csv(file.path(data_dir, "indicadores_cantonales_arcgis.csv"),
+                   stringsAsFactors = FALSE) %>%
+  mutate(
+    cod_prov = as.character(COD_PROV),
+    cod_cant = as.character(COD_CANT),
+    idphc = as.numeric(IDPHC),
+    idhc  = as.numeric(IDHC),
+    idrgc = as.numeric(IDRGC),
+    igfm  = as.numeric(IGFM),
+    poblacion_2011 = as.numeric(POBLACION_CENSADA_2011),
+    poblacion_2015 = as.numeric(POBLACION_ESTIMADA_2015),
+    electores = as.numeric(ELECTORES),
+    superficie_km2 = as.numeric(EXTENSION_KM2)
+  ) %>%
+  select(cod_prov, cod_cant, idphc, idhc, idrgc, igfm,
+         poblacion_2011, poblacion_2015, electores, superficie_km2)
+
+# PIB Cantonal 2022 del BCCR (más reciente disponible)
+pib <- read.csv(file.path(data_dir, "pib_cantonal_completo.csv"),
+                stringsAsFactors = FALSE) %>%
+  filter(anio == 2022) %>%
+  mutate(
+    cod_prov = as.character(cod_prov),
+    cod_cant = as.character(cod_cant),
+    pib_millones = as.numeric(pib) / 1e6
+  ) %>%
+  select(cod_prov, cod_cant, pib, pib_millones,
+         valor_agregado, exportaciones, importaciones)
+
+# Merge
+df <- ids %>%
+  left_join(arcgis, by = c("cod_prov", "cod_cant")) %>%
+  left_join(pib, by = c("cod_prov", "cod_cant")) %>%
+  mutate(pib_per_capita = as.numeric(pib) / as.numeric(poblacion_2015))
+
+cat("Dataset:", nrow(df), "cantones,", ncol(df), "variables\n")
+```
+
+# 1. Introducción
+
+El **Índice de Desarrollo Social (IDS) 2023**, elaborado por MIDEPLAN, mide el nivel de desarrollo relativo de los cantones y distritos de Costa Rica en una escala de 0 a 100. Se compone de cinco dimensiones:
+
+| Dimensión | Ponderación |
+|:---|---:|
+| Económica | 28.1% |
+| Salud | 25.5% |
+| Educación | 24.0% |
+| Participación electoral | 15.9% |
+| Seguridad | 6.5% |
+
+Este proyecto explora qué factores se asocian con el IDS cantonal, combinando datos del propio IDS (sus dimensiones internas) con indicadores externos del Atlas de Desarrollo Humano Cantonal (PNUD/UCR/INEC) y el Producto Interno Bruto cantonal del BCCR (2019-2022).
+
+```{r glimpse}
+glimpse(df)
+```
+
+# 2. Análisis Exploratorio de Datos (EDA)
+
+```{r eda-summary}
+summary(df[, c("ids_2023_final", "indice_salud", "indice_participa",
+               "indice_seguridad", "indice_educacion", "indice_economico",
+                "idphc", "idhc", "igfm", "poblacion_2011",
+                "pib_per_capita")])
+```
+
+## Distribución del IDS 2023
+
+```{r eda-ids-hist}
+ggplot(df, aes(x = ids_2023_final)) +
+  geom_histogram(bins = 15, fill = "steelblue", color = "white", alpha = 0.85) +
+  labs(title = "Distribución del Índice de Desarrollo Social 2023",
+       subtitle = paste0(nrow(df), " cantones"),
+       x = "IDS 2023", y = "Frecuencia") +
+  theme_minimal()
+```
+
+## Top 10 y bottom 10 cantones
+
+```{r eda-top-bottom}
+top10 <- df %>% arrange(desc(ids_2023_final)) %>% slice_head(n = 10) %>%
+  select(canton, ids_2023_final, indice_economico, indice_educacion, indice_salud)
+bot10 <- df %>% arrange(ids_2023_final) %>% slice_head(n = 10) %>%
+  select(canton, ids_2023_final, indice_economico, indice_educacion, indice_salud)
+
+cat("=== TOP 10 ===\n")
+print(top10)
+cat("\n=== BOTTOM 10 ===\n")
+print(bot10)
+```
+
+## Distribución por provincia
+
+```{r eda-provincia, fig.height=5}
+# Extraer provincia del código
+df <- df %>% mutate(
+  provincia = case_when(
+    cod_prov == "1" ~ "San José", cod_prov == "2" ~ "Alajuela",
+    cod_prov == "3" ~ "Cartago",  cod_prov == "4" ~ "Heredia",
+    cod_prov == "5" ~ "Guanacaste", cod_prov == "6" ~ "Puntarenas",
+    cod_prov == "7" ~ "Limón", TRUE ~ as.character(cod_prov)
+  )
+)
+
+ggplot(df, aes(x = reorder(provincia, ids_2023_final, median), y = ids_2023_final)) +
+  geom_boxplot(fill = "tomato", alpha = 0.6, outlier.color = "red") +
+  geom_jitter(width = 0.15, alpha = 0.5, color = "navy") +
+  labs(title = "IDS 2023 por provincia",
+       x = "Provincia", y = "IDS 2023") +
+  coord_flip() + theme_minimal()
+```
+
+# 3. Matriz de Correlaciones
+
+```{r cor-mat}
+vars_cor <- df %>%
+  select(ids_2023_final, indice_salud, indice_participa, indice_seguridad,
+         indice_educacion, indice_economico, idphc, idhc, igfm,
+         poblacion_2011, pib_per_capita) %>%
+  drop_na()
+
+M <- cor(vars_cor)
+colnames(M) <- c("IDS 2023", "Salud", "Particip.", "Seguridad", "Educación",
+                 "Económico", "IDPHC", "IDHC", "IGFM", "Población",
+                 "PIB per cápita")
+rownames(M) <- colnames(M)
+
+corrplot(M, method = "color", type = "upper", order = "hclust",
+         addCoef.col = "black", number.cex = 0.7, tl.col = "black",
+         tl.cex = 0.8, col = colorRampPalette(c("red", "white", "blue"))(200))
+```
+
+**Hallazgos clave:**
+- El IDS correlaciona fuertemente con los índices de cada dimensión (como era de esperar, pues las conforman).
+- El **IDHC** (Índice de Desarrollo Humano Cantonal 2011) tiene correlación moderada-alta con el IDS 2023.
+- El **IDPHC** (pobreza humana) correlaciona negativamente: a mayor pobreza, menor IDS.
+- La **población** muestra correlación débil, lo que sugiere que el desarrollo no depende del tamaño del cantón.
+- El **PIB per cápita cantonal (BCCR 2022)** muestra correlación positiva moderada con el IDS.
+
+```{r ggpairs, fig.height=10, fig.width=12}
+ggpairs(vars_cor, columns = 1:6,
+        upper = list(continuous = wrap("cor", size = 3)),
+        lower = list(continuous = wrap("points", alpha = 0.4, size = 0.8)),
+        diag = list(continuous = wrap("barDiag", bins = 12))) +
+  labs(title = "Relaciones entre dimensiones del IDS")
+```
+
+# 4. Análisis de Componentes Principales (PCA)
+
+Aplicamos PCA a las cinco dimensiones del IDS para entender su estructura subyacente.
+
+```{r pca}
+pca_vars <- df %>%
+  select(indice_salud, indice_participa, indice_seguridad,
+         indice_educacion, indice_economico) %>%
+  drop_na()
+
+pca <- PCA(pca_vars, scale.unit = TRUE, graph = FALSE)
+```
+
+```{r pca-eigen}
+fviz_eig(pca, addlabels = TRUE, barfill = "steelblue", barcolor = "steelblue") +
+  labs(title = "Varianza explicada por componente principal")
+```
+
+```{r pca-vars}
+fviz_pca_var(pca, col.var = "contrib", gradient.cols = c("blue", "orange", "red"),
+             repel = TRUE) +
+  labs(title = "Círculo de correlaciones - Dimensiones del IDS")
+```
+
+```{r pca-biplot}
+fviz_pca_biplot(pca,
+                col.ind = df$provincia[!is.na(df$indice_salud)],
+                palette = "Set2", addEllipses = TRUE, ellipse.level = 0.68,
+                repel = TRUE, alpha.ind = 0.5) +
+  labs(title = "Biplot PCA: Cantones según dimensiones del IDS",
+       color = "Provincia")
+```
+
+**Interpretación del PCA:**
+- Las dimensiones **Económica**, **Educación** y **Salud** son las que más contribuyen al primer componente (desarrollo general).
+- La **Participación electoral** y **Seguridad** aportan al segundo componente, representando dimensiones complementarias.
+- Los cantones del GAM (San José, Heredia) se agrupan con puntajes altos; los de la periferia (Limón, Puntarenas, Guanacaste) se ubican en el lado opuesto.
+
+# 5. Regresión Lineal Múltiple
+
+Modelamos el IDS 2023 como función de los indicadores externos disponibles.
+
+```{r lm-data}
+lm_df <- df %>%
+  select(ids_2023_final, idphc, idhc, igfm, poblacion_2011, pib_per_capita) %>%
+  drop_na()
+cat("Observaciones para regresión:", nrow(lm_df), "\n")
+```
+
+```{r lm-fit}
+lm1 <- lm(ids_2023_final ~ idphc + idhc + igfm + poblacion_2011 + pib_per_capita, data = lm_df)
+summary(lm1)
+```
+
+```{r lm-diagnostic, fig.width=12, fig.height=8}
+par(mfrow = c(2, 2))
+plot(lm1)
+```
+
+```{r lm-vif}
+cat("VIF (Factor de Inflación de Varianza):\n")
+print(vif(lm1))
+```
+
+```{r lm-autocor}
+cat("Test de Durbin-Watson (autocorrelación):\n")
+print(dwtest(lm1))
+```
+
+```{r lm-modelo2}
+# Modelo reducido con predictores significativos
+lm2 <- lm(ids_2023_final ~ idphc + idhc, data = lm_df)
+summary(lm2)
+```
+
+```{r lm-comparacion}
+anova(lm2, lm1)
+```
+
+**Interpretación:**
+- El **IDHC 2011** (desarrollo humano cantonal) es el predictor más fuerte del IDS 2023, lo que indica estabilidad en las disparidades territoriales.
+- El **IDPHC 2011** (pobreza humana) aporta poder explicativo adicional con signo negativo: cantones con mayor pobreza humana en 2011 tienden a tener menor IDS en 2023.
+- El IGFM (gestión financiera municipal), la población y el PIB per cápita no resultan significativos al incluir IDPHC e IDHC —estos últimos ya capturan la mayor parte de la varianza.
+- El modelo con IDPHC + IDHC explica más del `r summary(lm2)$r.squared * 100`% de la variación del IDS, lo que muestra que las disparidades de desarrollo son estructurales y persistentes en el tiempo.
+
+# 6. Visualización Geoespacial
+
+```{r map-load}
+cantones_sf <- st_read(file.path(data_dir, "cantones_geometria.geojson"),
+                        quiet = TRUE) %>%
+  mutate(
+    cod_prov = COD_PROV,
+    cod_cant = COD_CANT,
+    nom_cant = NOM_CANT
+  )
+
+df_map <- df %>%
+  mutate(cod_prov = as.character(cod_prov), cod_cant = as.character(cod_cant))
+
+map_data <- cantones_sf %>%
+  left_join(df_map, by = c("cod_prov", "cod_cant"))
+```
+
+```{r map-ids, fig.height=8, fig.width=10}
+ggplot(map_data) +
+  geom_sf(aes(fill = ids_2023_final), color = "gray30", size = 0.3) +
+  scale_fill_gradient(low = "red", high = "darkgreen", name = "IDS 2023") +
+  labs(title = "Índice de Desarrollo Social 2023 por Cantón",
+       subtitle = "Fuente: MIDEPLAN") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5))
+```
+
+```{r map-idhc, fig.height=8, fig.width=10}
+ggplot(map_data) +
+  geom_sf(aes(fill = idhc), color = "gray30", size = 0.3) +
+  scale_fill_gradient(low = "yellow", high = "darkblue", name = "IDHC 2011") +
+  labs(title = "Índice de Desarrollo Humano Cantonal 2011",
+       subtitle = "Fuente: PNUD/UCR/INEC") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5))
+```
+
+```{r map-pib, fig.height=8, fig.width=10}
+ggplot(map_data) +
+  geom_sf(aes(fill = pib_per_capita), color = "gray30", size = 0.3) +
+  scale_fill_gradient(low = "lightyellow", high = "darkred",
+                      name = "PIB per cápita\n2022 (₡)",
+                      labels = scales::comma) +
+  labs(title = "PIB per cápita Cantonal 2022 (BCCR)",
+       subtitle = "Colones por habitante") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5))
+```
+
+```{r map-dims-facet, fig.height=10, fig.width=14}
+dims_long <- map_data %>%
+  select(geometry, nom_cant, indice_salud, indice_educacion,
+         indice_economico, indice_participa) %>%
+  pivot_longer(cols = c(indice_salud, indice_educacion,
+                        indice_economico, indice_participa),
+               names_to = "dimension", values_to = "valor") %>%
+  mutate(dimension = case_when(
+    dimension == "indice_salud" ~ "Salud",
+    dimension == "indice_educacion" ~ "Educación",
+    dimension == "indice_economico" ~ "Económico",
+    dimension == "indice_participa" ~ "Participación electoral"
+  ))
+
+ggplot(dims_long) +
+  geom_sf(aes(fill = valor), color = "gray50", size = 0.2) +
+  facet_wrap(~dimension, ncol = 2) +
+  scale_fill_gradient(low = "orange", high = "darkgreen", name = "Índice") +
+  labs(title = "Dimensiones del IDS 2023 por cantón") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+# 7. Conclusiones
+
+```{r conclusiones, results='asis'}
+cat("
+1. **Persistencia de disparidades:** El IDS 2023 muestra una fuerte correlación con el IDHC 2011, lo que sugiere que las brechas territoriales en Costa Rica son estructurales y de larga data.
+
+2. **Factores determinantes:** Las dimensiones Económica (28.1%), Salud (25.5%) y Educación (24.0%) explican la mayor parte del IDS. El PCA confirma que estas tres dimensiones conforman un eje común de 'desarrollo estructural'.
+
+3. **Geografía del desarrollo:** El patrón centro-periferia se mantiene: los cantones del GAM (San José, Heredia, Cartago) concentran los puntajes más altos, mientras que las zonas fronterizas y costeras (Los Chiles, Talamanca, Buenos Aires) presentan los menores.
+
+4. **PIB y desarrollo:** El PIB per cápita cantonal (BCCR 2022) correlaciona positivamente con el IDS, pero al incluir IDPHC e IDHC en el modelo de regresión pierde significancia. El desarrollo humano previo ya incorpora el efecto de la actividad económica —el PIB per se no garantiza desarrollo social si no va acompañado de inversión en salud y educación.
+
+5. **Limitaciones del estudio:** Los indicadores externos (IDPHC, IDHC, IGFM) datan de 2011-2013 y el PIB cantonal solo está disponible hasta 2022. Sería valioso repetir el análisis con microdatos del Censo 2022 del INEC, si estuvieran disponibles a nivel cantonal, para construir indicadores actualizados.
+
+6. **Implicación de política:** La focalización territorial del gasto público sigue siendo necesaria. Cantones con bajo IDS en 2023 eran ya los más rezagados en 2011, lo que indica que las intervenciones no han logrado cerrar las brechas en más de una década.
+")
+```
+
+---
+*Proyecto elaborado con R. Datos: MIDEPLAN (IDS 2023), PNUD/UCR/INEC (Atlas de Desarrollo Humano Cantonal).*
